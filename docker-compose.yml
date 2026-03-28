@@ -1,0 +1,119 @@
+version: "3.9"
+
+services:
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: patstat_postgres
+    environment:
+      POSTGRES_USER: patstat
+      POSTGRES_PASSWORD: patstat_pass
+      POSTGRES_DB: patstat_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U patstat -d patstat_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: patstat_redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── FastAPI ─────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patstat_api
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      APP_ENV: development
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://patstat:patstat_pass@postgres:5432/patstat_db
+      DATABASE_URL_SYNC: postgresql://patstat:patstat_pass@postgres:5432/patstat_db
+      REDIS_URL: redis://redis:6379/0
+      REDIS_CELERY_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SECRET_KEY: dev-secret-key-change-in-production
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./secrets:/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Celery Worker ───────────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patstat_celery
+    command: celery -A src.tasks.celery_app.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      APP_ENV: development
+      DATABASE_URL_SYNC: postgresql://patstat:patstat_pass@postgres:5432/patstat_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SECRET_KEY: dev-secret-key-change-in-production
+      FIREBASE_CREDENTIALS_PATH: /secrets/firebase-service-account.json
+    volumes:
+      - .:/app
+      - ./secrets:/secrets
+    depends_on:
+      - redis
+      - postgres
+
+  # ─── Celery Beat (scheduler) ─────────────────────────────────────────────────
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patstat_beat
+    command: celery -A src.tasks.celery_app.celery_app beat --loglevel=info
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+
+  # ─── Flower (Celery monitoring UI) ───────────────────────────────────────────
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patstat_flower
+    command: celery -A src.tasks.celery_app.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+    depends_on:
+      - redis
+
+volumes:
+  postgres_data:
+  redis_data:

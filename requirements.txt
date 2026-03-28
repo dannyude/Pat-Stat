@@ -1,0 +1,45 @@
+# Web framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+slowapi==0.1.9
+
+# Database
+sqlalchemy==2.0.30
+asyncpg==0.30.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# Redis
+redis==5.0.4
+hiredis==2.3.2
+
+# Celery
+celery==5.4.0
+celery[redis]==5.4.0
+flower==2.0.1
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
+# Validation & settings
+pydantic==2.7.1
+pydantic-settings==2.2.1
+email-validator==2.1.1
+
+# Firebase (FCM push)
+firebase-admin==6.5.0
+
+# HTTP client (for internal calls)
+httpx==0.27.0
+
+# Dates / utils
+python-dateutil==2.9.0
+pytz==2024.1
+
+# Dev / testing
+pytest==8.2.0
+pytest-asyncio==0.23.6
+httpx==0.27.0
