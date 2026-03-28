@@ -1,711 +1,468 @@
-# PatStat Backend
+<p align="center">
+  <strong>P A T S T A T</strong><br>
+  <em>Real-time patient status tracking & family notification system</em>
+</p>
 
-FastAPI backend for the PatStat patient status tracking system.
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square" alt="FastAPI">
+  <img src="https://img.shields.io/badge/PostgreSQL-16-336791?style=flat-square" alt="PostgreSQL">
+  <img src="https://img.shields.io/badge/Redis-7-DC382D?style=flat-square" alt="Redis">
+  <img src="https://img.shields.io/badge/Celery-5.4-37814A?style=flat-square" alt="Celery">
+</p>
+
+---
+
+PatStat is a hospital-grade backend that lets clinical staff track patient statuses in real time while keeping families informed through push notifications and a dedicated mobile API. Each hospital runs its own isolated instance — no data crosses boundaries.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        PatStat Backend                           │
-│                                                                  │
-│  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────┐   │
-│  │  Family App │   │  Doctor App │   │    Admin Dashboard  │   │
-│  └──────┬──────┘   └──────┬──────┘   └──────────┬──────────┘   │
-│         │                 │                       │              │
-│         └────────────┬────┘                       │              │
-│                      │  REST + WebSocket           │              │
-│              ┌───────▼──────────────────────────┐ │              │
-│              │           FastAPI                │◄┘              │
-│              │   /api/v1/auth                   │                │
-│              │   /api/v1/family                 │                │
-│              │   /api/v1/clinical               │                │
-│              │   /api/v1/admin                  │                │
-│              │   /ws/patient/{id}   ◄─ WS       │                │
-│              └──────┬──────────────┬────────────┘                │
-│                     │              │                              │
-│              ┌──────▼──┐    ┌──────▼──────────────────────┐     │
-│              │PostgreSQL│    │   Redis (2 DBs)              │     │
-│              │          │    │   DB0: pub/sub + cache       │     │
-│              │ patients │    │   DB1: celery broker         │     │
-│              │ updates  │    │   DB2: refresh tokens        │     │
-│              │ users    │    └──────────────┬───────────────┘     │
-│              └──────────┘                   │                     │
-│                                    ┌────────▼──────────────┐     │
-│                                    │    Celery Worker       │     │
-│                                    │  notify_family_of_     │     │
-│                                    │  update task           │     │
-│                                    │       │                │     │
-│                                    │  ┌────▼────────────┐  │     │
-│                                    │  │  Firebase FCM   │  │     │
-│                                    │  │  Push to family │  │     │
-│                                    │  │  mobile devices │  │     │
-│                                    │  └─────────────────┘  │     │
-│                                    └───────────────────────┘     │
-└──────────────────────────────────────────────────────────────────┘
+                    ┌─────────────┐  ┌────────────┐  ┌───────────────┐
+                    │ Family App  │  │ Doctor App │  │ Admin Panel   │
+                    └──────┬──────┘  └─────┬──────┘  └──────┬────────┘
+                           │               │                 │
+                           └───────┬───────┘                 │
+                                   │  REST + WebSocket       │
+                           ┌───────▼─────────────────────────▼──┐
+                           │            FastAPI                  │
+                           │                                     │
+                           │   /api/v1/auth      Authentication  │
+                           │   /api/v1/patients  Patient CRUD    │
+                           │   /api/v1/dashboard Stats & Alerts  │
+                           │   /api/v1/family    Family Portal   │
+                           │   /ws/patient/{id}  Live Feed       │
+                           └──────┬─────────────────┬────────────┘
+                                  │                 │
+                        ┌─────────▼───┐   ┌─────────▼──────────────┐
+                        │ PostgreSQL  │   │ Redis                  │
+                        │             │   │  DB 0 — pub/sub + cache│
+                        │  patients   │   │  DB 1 — Celery broker  │
+                        │  admissions │   │  DB 2 — refresh tokens │
+                        │  users      │   └─────────┬──────────────┘
+                        └─────────────┘             │
+                                            ┌───────▼───────────┐
+                                            │  Celery Worker     │
+                                            │                    │
+                                            │  FCM Push ──► Family
+                                            │  Email     ──► Invites
+                                            │  Cleanup   ──► Stale data
+                                            └────────────────────┘
 ```
 
-## Real-Time Flow (the key pipeline)
+## Real-Time Pipeline
+
+When a doctor posts a clinical update, this is what happens:
 
 ```
-Doctor POSTs to /api/v1/clinical/patients/{id}/updates
+POST /api/v1/patients/{id}/updates
   │
-  ├─ 1. Write PatientUpdate row to PostgreSQL
-  ├─ 2. Update Patient.status in PostgreSQL
-  ├─ 3. await publish_patient_update(patient_id, event)
-  │       └─ Redis PUBLISH patient:{id}:updates  <JSON event>
-  │               └─ All WS connections subscribed wake up
-  │                       └─ Each sends JSON to connected client
-  └─ 4. notify_family_of_update.delay(...)
-          └─ Celery picks up task
-                ├─ Queries FamilyPatientLink for all family user_ids
-                ├─ Queries DeviceToken for all FCM tokens
-                ├─ Writes NotificationLog rows
-                └─ Fires FCM MulticastMessage to all tokens
+  ├─ 1. Write ClinicalUpdate row to PostgreSQL
+  ├─ 2. Update Admission.status
+  ├─ 3. Redis PUBLISH patient:{id}:updates
+  │       └─ All WebSocket subscribers receive the event instantly
+  └─ 4. Celery task: notify_family_of_update
+          ├─ Create NotificationLog for each linked family member
+          └─ Firebase FCM multicast to all registered devices
 ```
 
-## Project Structure
-
-```
-patstat-backend/
-├── app/
-│   ├── main.py              # FastAPI app, lifespan, routers
-│   ├── config.py            # Pydantic settings (reads .env)
-│   ├── database.py          # Async SQLAlchemy engine + session
-│   ├── models/
-│   │   └── __init__.py      # All SQLAlchemy models
-│   ├── schemas/
-│   │   └── __init__.py      # All Pydantic request/response schemas
-│   ├── core/
-│   │   ├── auth.py          # JWT, password hashing, role guards
-│   │   ├── redis.py         # Redis pool, pub/sub, cache helpers
-│   │   └── websocket_manager.py  # WS connection tracking
-│   ├── api/
-│   │   ├── auth.py          # /auth/* routes
-│   │   ├── family.py        # /family/* routes (family dashboard)
-│   │   ├── clinical.py      # /clinical/* routes (doctors/nurses)
-│   │   ├── admin.py         # /admin/* routes
-│   │   └── websocket.py     # /ws/patient/{id} WebSocket
-│   └── tasks/
-│       └── celery_app.py    # Celery app + FCM tasks
-├── tests/
-│   └── test_pipeline.py     # Integration tests
-├── alembic/                 # DB migrations
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-└── .env.example
-```
+---
 
 ## Quick Start
 
-### 1. Clone and configure
+### Prerequisites
+
+- Docker & Docker Compose
+- A Firebase service account JSON (for push notifications)
+
+### 1. Configure
+
 ```bash
 cp .env.example .env
-# Edit .env with your values
+# Edit .env with your database, Redis, JWT, and Firebase settings
 ```
 
-Config note:
-- Runtime config is now string-backed from `.env` via `src/core/config.py`.
-- `.env.example` lists all required keys and marks keys moved from code defaults.
-- DB ORM uses SQLAlchemy declarative mappings in `src/domains/*/models.py` (not FastAPI schemas).
-
 ### 2. Add Firebase credentials
+
 ```bash
 mkdir secrets
 # Place your firebase-service-account.json in secrets/
 ```
 
-### 3. Start everything
+### 3. Launch
+
 ```bash
 docker compose up --build
 ```
 
-Services started:
-| Service | URL |
-|---|---|
-| FastAPI | http://localhost:8000 |
-| API Docs | http://localhost:8000/docs |
-| Flower (Celery UI) | http://localhost:5555 |
-| PostgreSQL | localhost:5432 |
-| Redis | localhost:6379 |
+| Service    | URL                          |
+|------------|------------------------------|
+| API        | http://localhost:8000        |
+| Swagger UI | http://localhost:8000/docs   |
+| Flower     | http://localhost:5555        |
+| PostgreSQL | localhost:5432               |
+| Redis      | localhost:6379               |
 
-### 4. Run without Docker (dev)
+### 4. Bootstrap the first admin
+
+```bash
+python scripts/seed_super_admin.py
+```
+
+### 5. Run migrations
+
+```bash
+alembic upgrade head
+```
+
+### 6. Run without Docker (dev)
+
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# Start API
-uvicorn app.main:app --reload --port 8000
+# Terminal 1 — API
+uvicorn src.main:app --reload --port 8000
 
-# Start Celery worker (separate terminal)
-celery -A app.tasks.celery_app.celery_app worker --loglevel=info
+# Terminal 2 — Worker
+celery -A src.tasks.celery_app.celery_app worker --loglevel=info
 
-# Start Celery beat scheduler (separate terminal)
-celery -A app.tasks.celery_app.celery_app beat --loglevel=info
+# Terminal 3 — Beat scheduler
+celery -A src.tasks.celery_app.celery_app beat --loglevel=info
 ```
 
-### 5. First-time setup
+---
+
+## API Reference
+
+All endpoints are prefixed with `/api/v1`. Auth is via `Authorization: Bearer <token>`.
+
+### Authentication `/auth`
+
+| Method | Endpoint              | Description                  | Auth     |
+|--------|-----------------------|------------------------------|----------|
+| POST   | `/login`              | Get access + refresh tokens  | Public   |
+| POST   | `/refresh`            | Rotate access token          | Public   |
+| POST   | `/logout`             | Revoke refresh token         | Bearer   |
+| POST   | `/logout-all`         | Revoke all sessions          | Bearer   |
+| GET    | `/me`                 | Current user profile         | Bearer   |
+| PATCH  | `/me`                 | Update profile               | Bearer   |
+| POST   | `/change-password`    | Change password              | Bearer   |
+| POST   | `/device-token`       | Register FCM device token    | Bearer   |
+| POST   | `/register-staff`     | Create doctor/nurse/admin    | Admin    |
+
+### Patients `/patients`
+
+| Method | Endpoint                           | Description                        | Auth            |
+|--------|------------------------------------|------------------------------------|-----------------|
+| GET    | `/`                                | List active patients (searchable)  | Clinical, Family|
+| POST   | `/`                                | Admit new patient                  | Doctor, Admin   |
+| GET    | `/{id}`                            | Patient detail + active admission  | Clinical, Family|
+| PATCH  | `/{id}`                            | Update patient or admission        | Clinical        |
+| POST   | `/{id}/discharge`                  | Discharge patient                  | Doctor, Admin   |
+| GET    | `/note-categories`                 | Available note categories          | Clinical        |
+
+**Search params:** `q` (name, ID, ward, diagnosis), `active_only`, `skip`, `limit`
+
+### Clinical Updates `/patients/{id}/updates`
+
+| Method | Endpoint | Description                           | Auth     |
+|--------|----------|---------------------------------------|----------|
+| POST   | `/`      | Post status update + optional vitals  | Clinical |
+| GET    | `/`      | Update timeline (paginated)           | Clinical, Family |
+
+**Vitals captured:** blood pressure, heart rate, temperature, oxygen level
+
+Setting `mark_emergency: true` simultaneously creates an emergency flag.
+
+### Staff Notes `/patients/{id}/notes`
+
+| Method | Endpoint     | Description            | Auth     |
+|--------|--------------|------------------------|----------|
+| POST   | `/`          | Create internal note   | Clinical |
+| GET    | `/`          | List notes             | Clinical |
+| GET    | `/{note_id}` | Single note            | Clinical |
+
+> Staff notes are **never visible** to family users.
+
+**Categories:** General, Handover, Procedure, Consultation, Lab Result, Urgent
+
+### Emergency Flags `/emergency-flags`
+
+| Method | Endpoint            | Description            | Auth     |
+|--------|---------------------|------------------------|----------|
+| GET    | `/`                 | List flags             | Clinical |
+| POST   | `/`                 | Raise flag             | Clinical |
+| GET    | `/{id}`             | Flag detail            | Clinical |
+| PATCH  | `/{id}/resolve`     | Resolve flag           | Clinical |
+| GET    | `/count`            | Active flag count      | Clinical |
+
+**Priority levels:** High, Critical
+
+### Dashboard `/dashboard`
+
+| Method | Endpoint             | Description                        | Auth     |
+|--------|----------------------|------------------------------------|----------|
+| GET    | `/summary`           | Stats overview (cached 30s)        | Clinical |
+| GET    | `/critical-patients` | Patients in critical state         | Clinical |
+| GET    | `/needs-attention`   | No update in >12 hours             | Clinical |
+| GET    | `/recent-activity`   | Latest activity feed               | Clinical |
+
+**Summary returns:** `my_patients`, `critical_count`, `updates_today`, `needs_attention`
+
+### Shift Handover `/shift-handovers`
+
+| Method | Endpoint     | Description            | Auth     |
+|--------|--------------|------------------------|----------|
+| GET    | `/`          | List handovers         | Clinical |
+| POST   | `/`          | Record handover        | Clinical |
+| GET    | `/{id}`      | Handover detail        | Clinical |
+
+### Staff `/staff`
+
+| Method | Endpoint   | Description              | Auth     |
+|--------|------------|--------------------------|----------|
+| GET    | `/`        | List all staff           | Admin    |
+| GET    | `/me`      | Current user             | Bearer   |
+| GET    | `/doctors` | List doctors             | Clinical |
+| GET    | `/nurses`  | List nurses              | Clinical |
+
+### Notifications `/notifications`
+
+| Method | Endpoint            | Description          | Auth   |
+|--------|---------------------|----------------------|--------|
+| GET    | `/`                 | List notifications   | Bearer |
+| GET    | `/unread-count`     | Unread count         | Bearer |
+| PATCH  | `/{id}/read`        | Mark read            | Bearer |
+| POST   | `/read-all`         | Mark all read        | Bearer |
+
+### Hospitals `/hospitals`
+
+| Method | Endpoint | Description                        | Auth   |
+|--------|----------|------------------------------------|--------|
+| POST   | `/apply` | Apply for hospital registration    | Public |
+
+### Family Portal
+
+**Invitations** `/family/patients/{id}/invites`
+
+| Method | Endpoint          | Description             | Auth   |
+|--------|-------------------|-------------------------|--------|
+| POST   | `/`               | Send invite to family   | Admin  |
+| POST   | `/invites/accept` | Accept invite & sign up | Public |
+
+**Dashboard** `/family/me/patients`
+
+| Method | Endpoint                    | Description                     | Auth   |
+|--------|-----------------------------|---------------------------------|--------|
+| GET    | `/`                         | My linked patients              | Family |
+| GET    | `/{id}/overview`            | Patient overview + care team    | Family |
+| GET    | `/{id}/updates`             | Update history                  | Family |
+| GET    | `/{id}/mobile-dashboard`    | Combined view (mobile-optimized)| Family |
+
+### WebSocket `/ws/patient/{patient_id}`
+
+**Connection flow:**
+
+```
+1. Client connects to /ws/patient/{patient_id}
+2. Client sends: {"type": "auth", "token": "<access_token>"}
+3. Server confirms: {"type": "connected", "patient_id": "..."}
+```
+
+**Events received:**
+- `status_changed` — Patient status update
+- `emergency_flag_raised` — Emergency flag created
+- `handover_recorded` — Shift handover logged
+
+**Keep-alive:** Send `{"type": "ping"}` every 25 seconds.
+
+```javascript
+const ws = new WebSocket(`ws://localhost:8000/ws/patient/${patientId}`);
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "auth", token: accessToken }));
+};
+
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === "status_changed") {
+    console.log(`${data.patient_name}: ${data.new_status}`);
+  }
+};
+
+setInterval(() => ws.send(JSON.stringify({ type: "ping" })), 25000);
+```
+
+---
+
+## Data Model
+
+### Core Entities
+
+```
+Hospital 1──* User (staff, admin, family)
+    │
+    └──* Admission ──1 PatientProfile
+            │
+            ├──* ClinicalUpdate (status + vitals)
+            ├──* StaffNote (internal, hidden from family)
+            ├──* EmergencyFlag (high / critical)
+            ├──* ShiftHandover
+            └──* CareAssignment (doctor, nurse)
+
+PatientProfile 1──* FamilyPatientLink *──1 User (family)
+User 1──* DeviceToken (FCM)
+User 1──* NotificationLog
+```
+
+### Roles
+
+| Role          | Scope                                                   |
+|---------------|---------------------------------------------------------|
+| `super_admin` | Platform-level, no hospital                             |
+| `admin`       | Manages one hospital, creates staff, links families     |
+| `doctor`      | Admits patients, posts updates, manages care teams      |
+| `nurse`       | Posts updates, writes notes, views assigned patients    |
+| `family`      | Read-only access to linked patients via family portal   |
+
+### Patient Statuses
+
+`Being Monitored` → `Stable` → `Getting Better` → `Discharged`
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↘ `Critical`
+
+---
+
+## Environment Variables
+
+See `.env.example` for the full list. Key groups:
+
+| Group    | Variables                                                       |
+|----------|-----------------------------------------------------------------|
+| App      | `APP_ENV`, `SECRET_KEY`, `DEBUG`, `APP_HOST`, `APP_PORT`        |
+| Database | `DATABASE_URL`, `DATABASE_URL_SYNC`                             |
+| Redis    | `REDIS_URL`, `REDIS_CELERY_URL`, `REDIS_SESSION_DB`            |
+| JWT      | `JWT_ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `REFRESH_TOKEN_EXPIRE_DAYS` |
+| Firebase | `FIREBASE_CREDENTIALS_PATH`, `FCM_PROJECT_ID`                  |
+| Celery   | `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`                   |
+| CORS     | `ALLOWED_ORIGINS`                                               |
+| Limits   | `API_RATE_LIMIT_DEFAULT`, `AUTH_RATE_LIMIT`, `WRITE_RATE_LIMIT` |
+
+---
+
+## Background Tasks
+
+| Task                         | Trigger                         | What it does                                    |
+|------------------------------|---------------------------------|-------------------------------------------------|
+| `notify_family_of_update`    | Clinical update posted          | Creates NotificationLog + FCM push to family    |
+| `send_family_invite_email`   | Family invite created           | Sends invite email (plug in SES/SendGrid)       |
+| `cleanup_old_notifications`  | Daily at 02:00 UTC (Beat)       | Deletes notifications older than 30 days        |
+
+FCM tasks retry up to 3 times with 30s delay. Invalid device tokens are automatically pruned.
+
+---
+
+## Security
+
+- **JWT** access + refresh token rotation with Redis-backed revocation
+- **Bcrypt** password hashing via passlib
+- **RBAC** enforced at the route level with `require_roles()` dependency
+- **Hospital isolation** — every query scopes to `hospital_id`
+- **Rate limiting** via SlowAPI (120/min default, 30/min writes)
+- **WebSocket auth** — token validated + family link verified before streaming
+- **Super-admin cap** — max 3 super-admins enforced at creation time
+
+---
+
+## Testing
+
 ```bash
-# Bootstrap the first Pat-Stat Super Admin (Headquarters role)
-python scripts/create_super_admin.py
+# All tests
+pytest tests/ -v
+
+# Specific suite
+pytest tests/test_auth.py -v
+
+# With coverage
+pytest tests/ --cov=src
 ```
 
-### 6. Database migrations
+16 test modules covering auth, RBAC, patients, clinical updates, dashboard, emergency flags, shift handovers, staff, notifications, hospitals, family management, and WebSocket connections.
+
+---
+
+## Database Migrations
+
 ```bash
 # Create migration after model changes
 alembic revision --autogenerate -m "describe change"
 
-# Apply migrations
+# Apply
 alembic upgrade head
 
 # Rollback one step
 alembic downgrade -1
 ```
 
-### 7. Tests
-```bash
-pytest tests/ -v
-```
+---
 
-### 8. Backup and restore
+## Backup & Restore
+
 ```powershell
-# Create a timestamped backup dump
+# Backup
 ./scripts/backup_db.ps1
 
-# Restore from a dump file
+# Restore
 ./scripts/restore_db.ps1 -BackupFile backups/patstat-YYYYMMDD-HHMMSS.dump
 ```
 
-See BACKUP_STRATEGY.md for retention and validation guidelines.
+---
 
-## WebSocket Client Example (JavaScript)
+## Project Structure
 
-```javascript
-const patientId = "uuid-here";
-const token = "your-jwt-access-token";
-
-const ws = new WebSocket(
-  `ws://localhost:8000/ws/patient/${patientId}?token=${token}`
-);
-
-ws.onopen = () => console.log("Connected to PatStat real-time feed");
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-
-  if (data.event === "connected") {
-    console.log("Watching:", data.patient_name);
-  }
-
-  if (data.event === "status_changed") {
-    console.log(`${data.patient_name}: ${data.new_status}`);
-    // Update your React state here
-    updatePatientStatus(data.update);
-  }
-
-  if (data.type === "ping") {
-    ws.send(JSON.stringify({ type: "ping" }));
-  }
-};
-
-// Keep-alive
-setInterval(() => ws.send(JSON.stringify({ type: "ping" })), 25000);
 ```
-
-## API Endpoints Summary
-
-### Auth
-| Method | Path | Description |
-|---|---|---|
-| POST | /api/v1/auth/register | Create account |
-| POST | /api/v1/auth/login | Login, get tokens |
-| POST | /api/v1/auth/refresh | Rotate access token |
-| POST | /api/v1/auth/logout | Revoke refresh token |
-| POST | /api/v1/auth/change-password | Change current user's password |
-| GET | /api/v1/auth/me | Current user info |
-| PATCH | /api/v1/auth/me | Update current user profile |
-| POST | /api/v1/auth/device-token | Register FCM token |
-
-### Family (role: family)
-| Method | Path | Description |
-|---|---|---|
-| GET | /api/v1/family/patients | My linked patients |
-| GET | /api/v1/family/patients/{id} | Patient detail + care team |
-| GET | /api/v1/family/patients/{id}/updates | Update timeline (paginated) |
-| GET | /api/v1/family/patients/{id}/care-team | Care team list |
-| GET | /api/v1/family/notifications | My notifications |
-| POST | /api/v1/family/notifications/{id}/read | Mark read |
-| POST | /api/v1/family/notifications/read-all | Mark all read |
-
-### Clinical (role: doctor, nurse)
-| Method | Path | Description |
-|---|---|---|
-| POST | /api/v1/clinical/patients | Admit patient |
-| GET | /api/v1/clinical/patients | List all patients |
-| GET | /api/v1/clinical/patients/page | List patients (paginated metadata) |
-| POST | /api/v1/clinical/patients/{id}/updates | **Post status update** |
-| PATCH | /api/v1/clinical/patients/{id}/discharge | Discharge patient |
-| POST | /api/v1/clinical/patients/{id}/care-team | Assign staff |
-| DELETE | /api/v1/clinical/patients/{id}/care-team/{staff_id} | Unassign |
-
-### Admin (role: admin)
-| Method | Path | Description |
-|---|---|---|
-| GET | /api/v1/admin/stats | Dashboard statistics |
-| GET | /api/v1/admin/staff | List all staff |
-| GET | /api/v1/admin/staff/page | List staff (paginated metadata) |
-| POST | /api/v1/admin/family-links | Link family to patient |
-| DELETE | /api/v1/admin/family-links/{uid}/{pid} | Unlink |
-
-### WebSocket
-| Path | Description |
-|---|---|
-| /ws/patient/{id}?token= | Real-time patient feed |
-| /ws/admin?token= | All-patients admin feed |
-
-## Beautiful and Intuitive Frontend Starter (HTML + CSS)
-
-If you want a clean, modern, and intuitive first UI for PatStat, use the following
-template files. This gives you:
-
-- A clear dashboard hierarchy (hero, metrics, patient cards, timeline)
-- Strong visual direction (warm gradients, high contrast text, card depth)
-- Mobile-friendly responsive behavior
-
-Suggested placement:
-
-```text
 src/
-  static/
-    index.html
-    styles.css
+├── main.py                        # App entry, lifespan, router mount
+├── api/v1/
+│   ├── api_router.py              # Aggregates all route modules
+│   ├── auth.py                    # Login, tokens, staff registration
+│   ├── patients.py                # Patient CRUD + discharge
+│   ├── clinical_updates.py        # Status updates + vitals
+│   ├── staff_notes.py             # Internal clinical notes
+│   ├── emergency_flags.py         # Flag raise / resolve
+│   ├── shift_handover.py          # Handover recording
+│   ├── dashboard.py               # Stats, critical list, activity
+│   ├── staffs.py                  # Staff listing
+│   ├── notifications.py           # Notification management
+│   ├── hospitals.py               # Hospital registration
+│   ├── family_invites.py          # Invite flow
+│   ├── family_dashboard.py        # Family patient views
+│   └── ws.py                      # WebSocket handler
+├── core/
+│   ├── config.py                  # Pydantic Settings (.env)
+│   ├── database.py                # Async SQLAlchemy engine
+│   ├── security.py                # JWT + password + RBAC guards
+│   ├── redis_client.py            # Redis pool, pub/sub, cache
+│   ├── websockets.py              # Connection manager
+│   └── rate_limit.py              # SlowAPI setup
+├── domains/
+│   ├── users/                     # User, DeviceToken, UserRole
+│   ├── patients/                  # Patient, Admission, ClinicalUpdate, etc.
+│   ├── hospital/                  # Hospital, HospitalIdentifier
+│   ├── family/                    # FamilyInvite, FamilyPatientLink
+│   ├── assignments/               # CareAssignment
+│   └── backoffice/                # Super-admin operations
+├── tasks/
+│   ├── celery_app.py              # Celery config + Beat schedule
+│   ├── notifications.py           # FCM + notification tasks
+│   └── providers/firebase_push.py # FCM integration
+tests/                             # 16 test modules
+alembic/                           # Migration versions
+scripts/                           # seed_super_admin, backup, restore
 ```
 
-### index.html
+---
 
-```html
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PatStat Dashboard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <div class="bg-orb orb-a" aria-hidden="true"></div>
-    <div class="bg-orb orb-b" aria-hidden="true"></div>
+## License
 
-    <header class="topbar">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true">PS</span>
-        <div>
-          <p class="brand-eyebrow">Ward Control</p>
-          <h1>PatStat</h1>
-        </div>
-      </div>
-      <nav class="top-actions" aria-label="Quick actions">
-        <button class="btn btn-soft">Live Feed</button>
-        <button class="btn btn-primary">+ Add Update</button>
-      </nav>
-    </header>
-
-    <main class="layout">
-      <section class="hero card">
-        <p class="eyebrow">Hospital Operations</p>
-        <h2>Patient status at a glance, with zero confusion.</h2>
-        <p>
-          Track critical changes, identify urgent cases, and keep families informed in
-          real time.
-        </p>
-        <div class="stat-row" role="list" aria-label="Key metrics">
-          <article class="stat" role="listitem">
-            <h3>42</h3>
-            <p>Active Admissions</p>
-          </article>
-          <article class="stat" role="listitem">
-            <h3>7</h3>
-            <p>Emergency Flags</p>
-          </article>
-          <article class="stat" role="listitem">
-            <h3>19s</h3>
-            <p>Avg Notification Delay</p>
-          </article>
-        </div>
-      </section>
-
-      <section class="panel card">
-        <div class="panel-head">
-          <h3>Priority Patients</h3>
-          <a href="#">View all</a>
-        </div>
-        <ul class="patient-list">
-          <li class="patient-item">
-            <div>
-              <p class="patient-name">Amina Yusuf</p>
-              <p class="patient-meta">Ward A3 · Dr. Oke</p>
-            </div>
-            <span class="pill pill-critical">Critical</span>
-          </li>
-          <li class="patient-item">
-            <div>
-              <p class="patient-name">Michael Chen</p>
-              <p class="patient-meta">ICU 2 · Dr. Bello</p>
-            </div>
-            <span class="pill pill-watch">Under Observation</span>
-          </li>
-          <li class="patient-item">
-            <div>
-              <p class="patient-name">Ruth Adeyemi</p>
-              <p class="patient-meta">Ward C1 · Dr. Martins</p>
-            </div>
-            <span class="pill pill-stable">Stable</span>
-          </li>
-        </ul>
-      </section>
-
-      <section class="panel card">
-        <div class="panel-head">
-          <h3>Recent Timeline</h3>
-          <a href="#">Open stream</a>
-        </div>
-        <ol class="timeline">
-          <li>
-            <p class="time">08:41</p>
-            <p>Emergency flag raised for Amina Yusuf.</p>
-          </li>
-          <li>
-            <p class="time">08:37</p>
-            <p>Family notified for Michael Chen status change.</p>
-          </li>
-          <li>
-            <p class="time">08:31</p>
-            <p>Care team reassigned in Ward C1.</p>
-          </li>
-        </ol>
-      </section>
-    </main>
-  </body>
-</html>
-```
-
-### styles.css
-
-```css
-:root {
-  --bg: #f6f3ee;
-  --panel: #fffdf9;
-  --text: #1b1a18;
-  --muted: #5a5752;
-  --line: #e4ddd2;
-  --brand: #c4492d;
-  --brand-deep: #7d2a1d;
-  --ok: #2f7a4b;
-  --warn: #9d6a0f;
-  --danger: #9f2f2f;
-  --radius: 18px;
-  --shadow: 0 12px 30px rgba(57, 34, 14, 0.12);
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  min-height: 100vh;
-  font-family: "Space Grotesk", "Segoe UI", sans-serif;
-  color: var(--text);
-  background:
-    radial-gradient(circle at 15% 8%, #f6cfb5 0%, transparent 35%),
-    radial-gradient(circle at 92% 90%, #d8e5ce 0%, transparent 30%),
-    var(--bg);
-  padding: 24px;
-}
-
-h1,
-h2,
-h3 {
-  margin: 0;
-  line-height: 1.15;
-}
-
-p {
-  margin: 0;
-}
-
-.bg-orb {
-  position: fixed;
-  border-radius: 999px;
-  filter: blur(24px);
-  z-index: -1;
-  opacity: 0.6;
-}
-
-.orb-a {
-  width: 220px;
-  height: 220px;
-  top: -60px;
-  right: 10%;
-  background: #f1b89e;
-}
-
-.orb-b {
-  width: 260px;
-  height: 260px;
-  bottom: -100px;
-  left: 5%;
-  background: #b8d4b3;
-}
-
-.topbar {
-  max-width: 1120px;
-  margin: 0 auto 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.brand-mark {
-  display: inline-grid;
-  place-items: center;
-  width: 46px;
-  height: 46px;
-  border-radius: 14px;
-  background: linear-gradient(140deg, var(--brand), var(--brand-deep));
-  color: #fff;
-  font-weight: 700;
-}
-
-.brand h1 {
-  font-family: "Fraunces", Georgia, serif;
-  font-size: 1.7rem;
-}
-
-.brand-eyebrow,
-.eyebrow {
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 0.75rem;
-}
-
-.top-actions {
-  display: flex;
-  gap: 10px;
-}
-
-.btn {
-  border: 0;
-  border-radius: 999px;
-  padding: 10px 16px;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.btn-soft {
-  background: #ede7dd;
-  color: #2e2a24;
-}
-
-.btn-primary {
-  color: #fff;
-  background: linear-gradient(140deg, var(--brand), var(--brand-deep));
-  box-shadow: 0 8px 18px rgba(159, 47, 47, 0.25);
-}
-
-.layout {
-  max-width: 1120px;
-  margin: 0 auto;
-  display: grid;
-  gap: 16px;
-  grid-template-columns: 1.4fr 1fr;
-  animation: fade-up 500ms ease-out;
-}
-
-.card {
-  background: color-mix(in srgb, var(--panel) 94%, white 6%);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 18px;
-  box-shadow: var(--shadow);
-}
-
-.hero {
-  grid-column: 1 / -1;
-}
-
-.hero h2 {
-  margin-top: 8px;
-  max-width: 15ch;
-  font-family: "Fraunces", Georgia, serif;
-  font-size: clamp(1.6rem, 3.1vw, 2.5rem);
-}
-
-.hero > p {
-  margin-top: 10px;
-  color: var(--muted);
-  max-width: 56ch;
-}
-
-.stat-row {
-  margin-top: 16px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.stat {
-  background: #f1ece4;
-  border-radius: 14px;
-  border: 1px solid #e2d6c5;
-  padding: 12px;
-}
-
-.stat h3 {
-  font-size: 1.5rem;
-}
-
-.stat p {
-  color: var(--muted);
-  margin-top: 4px;
-}
-
-.panel-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 10px;
-}
-
-.panel-head a {
-  color: var(--brand-deep);
-  text-decoration: none;
-  font-weight: 600;
-}
-
-.patient-list,
-.timeline {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.patient-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 0;
-  border-top: 1px dashed var(--line);
-}
-
-.patient-item:first-child {
-  border-top: 0;
-}
-
-.patient-name {
-  font-weight: 700;
-}
-
-.patient-meta {
-  color: var(--muted);
-  margin-top: 2px;
-}
-
-.pill {
-  white-space: nowrap;
-  font-size: 0.8rem;
-  padding: 6px 10px;
-  border-radius: 999px;
-  font-weight: 700;
-}
-
-.pill-critical {
-  background: #f7d8d8;
-  color: var(--danger);
-}
-
-.pill-watch {
-  background: #f7ebd4;
-  color: var(--warn);
-}
-
-.pill-stable {
-  background: #deeedf;
-  color: var(--ok);
-}
-
-.timeline li {
-  padding: 12px 0;
-  border-top: 1px dashed var(--line);
-}
-
-.timeline li:first-child {
-  border-top: 0;
-}
-
-.timeline .time {
-  color: var(--brand-deep);
-  font-weight: 700;
-  font-size: 0.85rem;
-  margin-bottom: 3px;
-}
-
-@keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (max-width: 860px) {
-  body {
-    padding: 16px;
-  }
-
-  .layout {
-    grid-template-columns: 1fr;
-  }
-
-  .stat-row {
-    grid-template-columns: 1fr;
-  }
-
-  .topbar {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-}
-```
-
-### Optional FastAPI static mount
-
-If you want FastAPI to serve this static folder directly:
-
-```python
-from fastapi.staticfiles import StaticFiles
-
-app.mount("/", StaticFiles(directory="src/static", html=True), name="static")
-```
-
-Note: keep API routes under `/api/v1/*` and WebSocket routes under `/ws/*` so
-you can use this UI as a simple landing dashboard without affecting backend APIs.
+Proprietary. All rights reserved.
