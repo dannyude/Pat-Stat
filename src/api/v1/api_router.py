@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from src.api.v1.admin import router as admin_router
 from src.api.v1.auth import router as auth_router
+from src.api.v1.contact_sales import router as contact_sales_router
 from src.api.v1.clinical_updates import router as clinical_updates_router
 from src.api.v1.dashboard import router as dashboard_router
 from src.api.v1.emergency_flags import router as emergency_flags_router
@@ -30,6 +31,7 @@ api_router = APIRouter()
 api_router.include_router(admin_router)
 api_router.include_router(auth_router)
 api_router.include_router(backoffice_router)
+api_router.include_router(contact_sales_router)
 api_router.include_router(clinical_updates_router)
 api_router.include_router(dashboard_router)
 api_router.include_router(emergency_flags_router)

@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     # ─── CORS ─────────────────────────────────────────────────────────────────────
     ALLOWED_ORIGINS: str  # [Security]: Which frontends can hit this API
 
+    # ─── SMTP (Contact Sales & transactional email) ────────────────────────────
+    SMTP_HOST: str = "smtp.example.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = "noreply@pat-stat.com"
+    CONTACT_SALES_EMAIL: str = "sales@pat-stat.com"
+
+    # ─── CAPTCHA (Contact Sales spam protection) ──────────────────────────────────
+    CAPTCHA_SECRET_KEY: str = ""  # Empty = CAPTCHA disabled (dev/test mode)
+    CAPTCHA_PROVIDER: Literal["turnstile", "recaptcha"] = "turnstile"
+
     # ─── Rate Limiting ────────────────────────────────────────────────────────────
     API_RATE_LIMIT_DEFAULT: str = "120/minute"
     AUTH_RATE_LIMIT: str = "100/minute"
@@ -80,6 +92,8 @@ class Settings(BaseSettings):
                 raise ValueError("SECRET_KEY must not use placeholder values")
             if "*" in self.allowed_origins_list:
                 raise ValueError("ALLOWED_ORIGINS cannot include '*' in production")
+            if not self.CAPTCHA_SECRET_KEY or len(self.CAPTCHA_SECRET_KEY) < 20:
+                raise ValueError("CAPTCHA_SECRET_KEY must be set in production")
         return self
 
     @property

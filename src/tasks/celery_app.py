@@ -33,6 +33,7 @@ celery_app.conf.update(
 
 # Import task modules so decorators register tasks on this Celery app.
 importlib.import_module("src.tasks.notifications")
+importlib.import_module("src.tasks.contact_sales")
 
 
 __all__ = ["celery_app"]
