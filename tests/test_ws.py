@@ -226,3 +226,74 @@ def test_ws_forwards_redis_event_to_client():
             pushed = ws.receive_json()
             assert pushed["type"] == "status_changed"
             assert pushed["status"] == "critical"
+
+
+def test_ws_no_catchup_without_last_synced_at():
+    """When last_synced_at is omitted, _replay_missed_events is never called."""
+    token = create_access_token(USER_ID, UserRole.doctor.value)
+    with patch("src.api.v1.ws._replay_missed_events", new_callable=AsyncMock) as mock_replay:
+        with _ws_client(_mock_db_session(_make_user()), _silent_pubsub()) as client:
+            with client.websocket_connect(f"/ws/patient/{PATIENT_ID}") as ws:
+                ws.send_json({"type": "auth", "token": token})
+                msg = ws.receive_json()
+                assert msg["type"] == "connected"
+        mock_replay.assert_not_called()
+
+
+def test_ws_catchup_replays_missed_events():
+    """When last_synced_at is supplied, missed events are pushed before live feed."""
+    token = create_access_token(USER_ID, UserRole.doctor.value)
+
+    async def fake_replay(websocket, patient_id, since):
+        await websocket.send_json({
+            "type": "missed_update",
+            "event_type": "status_changed",
+            "patient_id": patient_id,
+            "update_id": "abc-123",
+            "status": "critical",
+            "note": "Patient deteriorating",
+            "created_at": "2026-04-10T10:46:00+00:00",
+        })
+
+    with patch("src.api.v1.ws._replay_missed_events", side_effect=fake_replay):
+        with _ws_client(_mock_db_session(_make_user()), _silent_pubsub()) as client:
+            with client.websocket_connect(f"/ws/patient/{PATIENT_ID}") as ws:
+                ws.send_json({
+                    "type": "auth",
+                    "token": token,
+                    "last_synced_at": "2026-04-10T10:45:00Z",
+                })
+                connected = ws.receive_json()
+                assert connected["type"] == "connected"
+
+                missed = ws.receive_json()
+                assert missed["type"] == "missed_update"
+                assert missed["event_type"] == "status_changed"
+                assert missed["update_id"] == "abc-123"
+
+
+def test_ws_catchup_failed_sends_notification():
+    """When catch-up hits a DB error, client receives catchup_failed and stays connected."""
+    token = create_access_token(USER_ID, UserRole.doctor.value)
+
+    async def failing_replay(websocket, patient_id, since):
+        raise Exception("DB connection lost")
+
+    with patch("src.api.v1.ws._replay_missed_events", side_effect=failing_replay):
+        with _ws_client(_mock_db_session(_make_user()), _silent_pubsub()) as client:
+            with client.websocket_connect(f"/ws/patient/{PATIENT_ID}") as ws:
+                ws.send_json({
+                    "type": "auth",
+                    "token": token,
+                    "last_synced_at": "2026-04-10T10:45:00Z",
+                })
+                connected = ws.receive_json()
+                assert connected["type"] == "connected"
+
+                notification = ws.receive_json()
+                assert notification["type"] == "catchup_failed"
+                assert "missed" in notification["message"].lower()
+
+                # Connection should still be alive — ping/pong works
+                ws.send_json({"type": "ping"})
+                assert ws.receive_json() == {"type": "pong"}
