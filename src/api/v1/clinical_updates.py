@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.config import settings
 from src.core.database import get_db
 from src.core.rate_limit import limiter
+from src.core.redis_client import publish_patient_event
 from src.core.security import get_current_user, require_roles
 from src.domains.patients.models import ClinicalUpdate, EmergencyFlag
 from src.domains.patients.schemas import ClinicalUpdateCreate, ClinicalUpdateOut
@@ -69,7 +70,16 @@ async def add_clinical_update(
     # [DB/Logic]: Flush to generate IDs, but commit happens automatically
     # at the end of the request via middleware/dependency injection setup.
     await db.flush()
-    return clinical_update_out(update, patient_id)
+    out = clinical_update_out(update, patient_id)
+    await publish_patient_event(patient_id, {
+        "type": "status_changed",
+        "patient_id": patient_id,
+        "status": body.status.value,
+        "note": body.note,
+        "update_id": update.id,
+        "created_at": update.created_at.isoformat(),
+    })
+    return out
 
 
 @router.get("/{patient_id}/updates", response_model=List[ClinicalUpdateOut])

@@ -1,9 +1,12 @@
 import json
+import logging
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
 
 from src.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 _redis_pool: Optional[aioredis.Redis] = None
 
@@ -118,6 +121,21 @@ async def revoke_all_user_tokens(user_id: str):
         await redis.delete(*keys)
 
 
+async def publish_patient_event(patient_id: str, event: dict) -> None:
+    """Publish a real-time event to all WebSocket clients watching a patient.
+
+    Silently swallows errors so a Redis hiccup never breaks the HTTP response.
+    """
+    try:
+        redis = await get_redis()
+        await redis.publish(
+            f"patient:{patient_id}:updates",
+            json.dumps(event, default=str),
+        )
+    except Exception:
+        logger.exception("Failed to publish patient event for patient=%s", patient_id)
+
+
 __all__ = [
     "get_redis",
     "close_redis",
@@ -127,4 +145,5 @@ __all__ = [
     "revoke_refresh_token",
     "is_refresh_token_valid",
     "revoke_all_user_tokens",
+    "publish_patient_event",
 ]

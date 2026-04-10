@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.database import get_db
+from src.core.redis_client import publish_patient_event
 from src.core.security import require_roles
 from src.domains.patients.models import Admission, EmergencyFlag
 from src.domains.patients.schemas import (
@@ -97,7 +98,16 @@ async def create_emergency_flag(
     await db.flush()
 
     # Re-fetch with relationships for the response
-    return _flag_to_out(await _get_flag(flag.id, db))
+    out = _flag_to_out(await _get_flag(flag.id, db))
+    await publish_patient_event(str(admission.patient_id), {
+        "type": "emergency_flag_raised",
+        "patient_id": str(admission.patient_id),
+        "flag_id": flag.id,
+        "priority": body.priority.value,
+        "reason": body.reason,
+        "created_at": flag.created_at.isoformat(),
+    })
+    return out
 
 
 @router.get("/count")

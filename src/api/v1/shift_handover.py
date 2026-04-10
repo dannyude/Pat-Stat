@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.database import get_db
+from src.core.redis_client import publish_patient_event
 from src.core.security import require_roles
 from src.domains.patients.models import Admission, ShiftHandover
 from src.domains.patients.schemas import ShiftHandoverCreate, ShiftHandoverOut
@@ -129,7 +130,15 @@ async def create_shift_handover(
 
     # Re-fetch with relationships
     result = await db.execute(_handover_query().where(ShiftHandover.id == handover.id))
-    return _handover_to_out(result.scalar_one())
+    out = _handover_to_out(result.scalar_one())
+    await publish_patient_event(str(admission.patient_id), {
+        "type": "handover_recorded",
+        "patient_id": str(admission.patient_id),
+        "handover_id": handover.id,
+        "summary": body.summary,
+        "created_at": handover.created_at.isoformat(),
+    })
+    return out
 
 
 @router.get("/{handover_id}", response_model=ShiftHandoverOut)
