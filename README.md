@@ -35,11 +35,11 @@ Each hospital runs in an isolated tenant context, and all access paths enforce h
 ```text
                     ┌─────────────┐  ┌────────────┐  ┌───────────────┐
                     │ Family App  │  │ Doctor App │  │ Admin Panel   │
-                    └──────┬──────┘  └─────┬──────┘  └──────┬────────┘
+                    └──────┬──────┘  └─────┬──────┘  └──────-┬───────┘
                            │               │                 │
                            └───────┬───────┘                 │
                                    │   REST + WebSocket      │
-                           ┌───────▼─────────────────────────▼──┐
+                           ┌───────▼─────────────────────────▼──-┐
                            │            FastAPI                  │
                            │                                     │
                            │   /api/v1/auth      Authentication  │
@@ -110,9 +110,9 @@ docker compose up --build
 
 | Service | URL |
 |---|---|
-| API | http://localhost:8000 |
-| Swagger UI | http://localhost:8000/docs |
-| Flower | http://localhost:5555 |
+| API | <http://localhost:8000> |
+| Swagger UI | <http://localhost:8000/docs> |
+| Flower | <http://localhost:5555> |
 | PostgreSQL | localhost:5432 |
 | Redis | localhost:6379 |
 

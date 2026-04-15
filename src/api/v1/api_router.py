@@ -20,6 +20,7 @@ from src.api.v1.notifications import router as notifications_router
 from src.api.v1.patients import router as patients_router
 from src.api.v1.shift_handover import router as shift_handover_router
 from src.api.v1.staff_notes import router as staff_notes_router
+from src.api.v1.staff_invites import router as staff_invites_router
 from src.api.v1.staffs import router as staffs_router
 from src.domains.backoffice.router import router as backoffice_router
 
@@ -40,5 +41,6 @@ api_router.include_router(notifications_router)
 api_router.include_router(patients_router)
 api_router.include_router(shift_handover_router)
 api_router.include_router(staff_notes_router)
+api_router.include_router(staff_invites_router)
 api_router.include_router(staffs_router)
 api_router.include_router(family_router)

@@ -53,8 +53,8 @@ from src.core.security import hash_password  # noqa: E402
 from src.domains.users.enums import UserRole  # noqa: E402
 from src.domains.users.models import User  # noqa: E402
 from src.domains.hospital.models import Hospital  # noqa: E402
-from src.domains.assignments.models import CareAssignment  # noqa: E402
-from src.domains.family.models import FamilyPatientLink  # noqa: E402
+from src.domains.assignments.models import CareAssignment # noqa: E402
+from src.domains.family.models import FamilyPatientLink # noqa: E402
 
 # Healthcare-grade password policy for privileged bootstrap accounts.
 # Stricter than the general app minimum (8 chars) because super-admins carry
@@ -151,6 +151,8 @@ async def _seed(request: _SeedRequest) -> int:
     Returns an exit code so the caller (main) can sys.exit() *after* asyncio
     has finished cleanly — avoiding ResourceWarning from abrupt loop teardown.
     """
+
+    
     async with AsyncSessionLocal() as db:
         # ── 1. Bootstrap guard — only works when platform has zero super-admins
         seat_count: int = (

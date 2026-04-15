@@ -5,17 +5,17 @@ services:
   # ─── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: patstat_postgres
+    container_name: patstat-db
     environment:
-      POSTGRES_USER: patstat
-      POSTGRES_PASSWORD: patstat_pass
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: patstat_db
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U patstat -d patstat_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d patstat_db"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -41,17 +41,26 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: patstat_api
-    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload --proxy-headers --forwarded-allow-ips=*
     environment:
       APP_ENV: development
       DEBUG: "true"
-      DATABASE_URL: postgresql+asyncpg://patstat:patstat_pass@postgres:5432/patstat_db
-      DATABASE_URL_SYNC: postgresql://patstat:patstat_pass@postgres:5432/patstat_db
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8000"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/patstat_db
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/patstat_db
       REDIS_URL: redis://redis:6379/0
+      REDIS_SESSION_DB: "2"
       REDIS_CELERY_URL: redis://redis:6379/1
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
-      SECRET_KEY: dev-secret-key-change-in-production
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+      REFRESH_TOKEN_EXPIRE_DAYS: "7"
+      FIREBASE_CREDENTIALS_PATH: /secrets/firebase-service-account.json
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
     ports:
       - "8000:8000"
     volumes:
@@ -72,11 +81,11 @@ services:
     command: celery -A src.tasks.celery_app.celery_app worker --loglevel=info --concurrency=4
     environment:
       APP_ENV: development
-      DATABASE_URL_SYNC: postgresql://patstat:patstat_pass@postgres:5432/patstat_db
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/patstat_db
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
-      SECRET_KEY: dev-secret-key-change-in-production
+      SECRET_KEY: ${SECRET_KEY}
       FIREBASE_CREDENTIALS_PATH: /secrets/firebase-service-account.json
     volumes:
       - .:/app

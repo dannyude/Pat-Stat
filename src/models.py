@@ -30,6 +30,7 @@ from src.domains.backoffice.models import (  # noqa: F401
     SuperAdminActionLog,
 )
 from src.domains.family.models import FamilyInvite  # noqa: F401
+from src.domains.staff_invites.models import StaffInvite  # noqa: F401
 from src.domains.contact_sales.models import ContactSalesSubmission  # noqa: F401
 
 __all__ = [
@@ -55,5 +56,6 @@ __all__ = [
     "HospitalVerificationEvent",
     "SuperAdminActionLog",
     "FamilyInvite",
+    "StaffInvite",
     "ContactSalesSubmission",
 ]

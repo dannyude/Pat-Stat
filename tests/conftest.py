@@ -3,6 +3,18 @@
 import sys
 import os
 
+# Override DB URLs before any src.* imports so the SQLAlchemy engine is created
+# with localhost (host-machine reachable) instead of the Docker-internal "postgres"
+# hostname that only resolves inside the Docker network.
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:Dannyude1Ad$@localhost:5432/patstat_db",
+)
+os.environ.setdefault(
+    "DATABASE_URL_SYNC",
+    "postgresql://postgres:Dannyude1Ad$@localhost:5432/patstat_db",
+)
+
 from unittest.mock import AsyncMock
 
 import pytest
