@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from src.api.v1.admin import router as admin_router
 from src.api.v1.auth import router as auth_router
 from src.api.v1.contact_sales import router as contact_sales_router
+from src.api.v1.clinical_notes_global import router as clinical_notes_global_router
 from src.api.v1.clinical_updates import router as clinical_updates_router
 from src.api.v1.dashboard import router as dashboard_router
 from src.api.v1.emergency_flags import router as emergency_flags_router
@@ -22,6 +23,7 @@ from src.api.v1.shift_handover import router as shift_handover_router
 from src.api.v1.staff_notes import router as staff_notes_router
 from src.api.v1.staff_invites import router as staff_invites_router
 from src.api.v1.staffs import router as staffs_router
+from src.api.v1.update_history import router as update_history_router
 from src.domains.backoffice.router import router as backoffice_router
 
 # [Config]: Initialize the main API v1 router.
@@ -33,6 +35,7 @@ api_router.include_router(admin_router)
 api_router.include_router(auth_router)
 api_router.include_router(backoffice_router)
 api_router.include_router(contact_sales_router)
+api_router.include_router(clinical_notes_global_router)
 api_router.include_router(clinical_updates_router)
 api_router.include_router(dashboard_router)
 api_router.include_router(emergency_flags_router)
@@ -43,4 +46,5 @@ api_router.include_router(shift_handover_router)
 api_router.include_router(staff_notes_router)
 api_router.include_router(staff_invites_router)
 api_router.include_router(staffs_router)
+api_router.include_router(update_history_router)
 api_router.include_router(family_router)

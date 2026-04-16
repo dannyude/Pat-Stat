@@ -42,6 +42,7 @@ def notify_family_of_update(
     update_id: str,
     note_preview: str,
     author_name: str,
+    category: str = "shift_log",
 ) -> dict:
     """Write NotificationLog rows and queue FCM push to all linked family members."""
     title = f"{patient_name} - {new_status}"
@@ -83,6 +84,7 @@ def notify_family_of_update(
                         update_id=update_id,
                         title=title,
                         body=body,
+                        category=category,
                     )
                 )
             if device_token is not None:
