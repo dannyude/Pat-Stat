@@ -92,18 +92,47 @@ app.add_middleware(SlowAPIMiddleware)
 
 
 # ─── Global exception handlers ────────────────────────────────────────────────
+#
+# The "ultimate safety net" for the API. Any exception that:
+#   • is NOT an HTTPException (FastAPI handles those itself with the right code)
+#   • is NOT a RequestValidationError (FastAPI returns a structured 422)
+#   • is NOT a RateLimitExceeded (handled by SlowAPI's _rate_limit_exceeded_handler)
+# falls through to here. We:
+#   1. Log it WITH traceback (logger.exception, NOT logger.error — the former
+#      captures exc_info automatically; the latter loses the stack).
+#   2. Return a generic 500 to the client. We deliberately do NOT include
+#      ``str(exc)`` in the response — the exception message can leak internal
+#      details (table names, stack frames, secrets in error strings). The
+#      client gets a polite, actionable message; the *real* details land in
+#      our logs where the engineering team can see them.
+#
+# Why use lazy ``%s`` formatting in the log call instead of an f-string:
+# logger.exception/error/info accept format args separately so the formatter
+# only runs when the log level is actually enabled. f-strings are eager and
+# pay the formatting cost even when the line would be filtered out.
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
+async def global_unhandled_exception_handler(request: Request, exc: Exception):
     """
-    Catches and logs any unhandled exceptions that occur during request processing.
-    Returns a generic 500 Internal Server Error to avoid exposing sensitive details.
+    Ultimate safety net for any bug that escapes per-route error handling.
+
+    Logs the full exception (with traceback) for engineering follow-up and
+    returns a polite, sanitised 500 response to the client. The client never
+    sees the underlying exception message.
     """
     logger.exception(
-        "Unhandled exception on %s %s", request.method, request.url, exc_info=exc
+        "Unhandled exception on %s %s — %s",
+        request.method,
+        request.url.path,
+        exc.__class__.__name__,
     )
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal server error"},
+        content={
+            "detail": (
+                "An unexpected error occurred. Our engineering team has been "
+                "notified."
+            )
+        },
     )
 
 
