@@ -8,12 +8,43 @@ import os
 # hostname that only resolves inside the Docker network.
 os.environ.setdefault(
     "DATABASE_URL",
-    "postgresql+asyncpg://postgres:Dannyude1Ad$@localhost:5432/patstat_db",
+    "postgresql+asyncpg://postgres:Dannyude1Ad$@localhost:6432/patstat_test_db",
 )
 os.environ.setdefault(
     "DATABASE_URL_SYNC",
-    "postgresql://postgres:Dannyude1Ad$@localhost:5432/patstat_db",
+    "postgresql://postgres:Dannyude1Ad$@localhost:6432/patstat_test_db",
 )
+
+
+# ─── Safety guard: refuse to run tests against a non-test database ─────────
+# The session-scoped ``setup_database`` fixture below runs
+# ``DROP SCHEMA public CASCADE`` on whatever DB ``DATABASE_URL`` points at.
+# If env vars accidentally point at a dev or production DB, that wipes all
+# real data — including the bootstrapped super-admin. The guard below
+# raises before any tests collect, so the DB is never touched.
+_db_url = os.environ.get("DATABASE_URL_SYNC", "")
+_db_url_async = os.environ.get("DATABASE_URL", "")
+_TEST_DB_MARKERS = ("test", "_test", "patstat_test")
+if not any(marker in _db_url.lower() or marker in _db_url_async.lower() for marker in _TEST_DB_MARKERS):
+    raise RuntimeError(
+        "\n"
+        "════════════════════════════════════════════════════════════════════\n"
+        "  REFUSING TO RUN TESTS — database URL does not appear to be a test DB.\n"
+        "\n"
+        "  DATABASE_URL_SYNC = " + (_db_url or "<unset>") + "\n"
+        "  DATABASE_URL      = " + (_db_url_async or "<unset>") + "\n"
+        "\n"
+        "  The test session would DROP SCHEMA public CASCADE on this DB,\n"
+        "  destroying every table. Override the env vars to point at a\n"
+        "  database whose name contains one of: " + ", ".join(_TEST_DB_MARKERS) + "\n"
+        "\n"
+        "  Example:\n"
+        "    docker exec \\\n"
+        "      -e DATABASE_URL='postgresql+asyncpg://...@postgres:5432/patstat_test_db' \\\n"
+        "      -e DATABASE_URL_SYNC='postgresql://...@postgres:5432/patstat_test_db' \\\n"
+        "      patstat_api pytest\n"
+        "════════════════════════════════════════════════════════════════════\n"
+    )
 
 from unittest.mock import AsyncMock
 
