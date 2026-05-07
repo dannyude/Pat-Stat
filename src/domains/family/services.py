@@ -26,6 +26,45 @@ from src.domains.users.enums import UserRole
 from src.domains.users.models import User
 
 
+async def assert_family_link_or_404(
+    db: AsyncSession,
+    family_user_id: str,
+    patient_id: str,
+) -> None:
+    """Raise 404 unless the family user has an active link to the patient.
+
+    Why this exists
+    ---------------
+    The legacy pattern in this module relied on JOINs to silently filter
+    out unauthorised reads (a non-linked family member would simply get an
+    empty result set). That worked for security but produced inconsistent
+    HTTP semantics across sibling endpoints — `/overview` 404s, `/updates`
+    returned 200 `[]`. A frontend can't tell "no updates yet" from
+    "you don't have access" with that contract.
+
+    By raising explicitly here, every family endpoint that calls this
+    helper has identical behaviour: 404 with the OWASP-uniform
+    ``"Patient not found"`` message that does NOT distinguish between
+    "this patient does not exist" and "this patient exists but isn't
+    yours" — protecting against ID enumeration attacks.
+
+    Defense-in-depth bonus
+    ----------------------
+    If a future refactor accidentally drops the ``family_patient_links``
+    JOIN from a downstream query, this explicit check keeps the data
+    safe. The two-layer protection (auth check + scoped JOIN) is the
+    standard pattern for sensitive read endpoints.
+    """
+    exists = await db.execute(
+        select(FamilyPatientLink.id).where(
+            FamilyPatientLink.family_user_id == family_user_id,
+            FamilyPatientLink.patient_id == patient_id,
+        )
+    )
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+
 async def get_active_admission(patient_id: str, db: AsyncSession) -> Admission:
     """Return the active admission for a patient.
 
@@ -202,9 +241,12 @@ async def get_family_patient_overview_admission(
     )
     admission = result.scalar_one_or_none()
     if admission is None:
-        raise HTTPException(
-            status_code=404, detail="Patient not found for this family account"
-        )
+        # Uniform error response per OWASP non-disclosure pattern:
+        # the message is identical whether the patient_id is fake or
+        # belongs to another family. Don't say "not found *for this
+        # account*" — that confirms the patient exists somewhere in
+        # the DB, letting an attacker enumerate IDs.
+        raise HTTPException(status_code=404, detail="Patient not found")
     return admission
 
 
@@ -216,6 +258,13 @@ async def list_family_patient_updates(
     db: AsyncSession,
 ) -> list[ClinicalUpdate]:
     """Return paginated clinical updates for a family-visible patient."""
+    # Explicit authorization check — raises 404 if no link exists, so
+    # the SQL below cannot leak data and the HTTP response is consistent
+    # with sibling endpoints (/overview, /mobile-dashboard).
+    await assert_family_link_or_404(
+        db=db, family_user_id=family_user_id, patient_id=patient_id
+    )
+
     result = await db.execute(
         select(ClinicalUpdate)
         .join(Admission, Admission.id == ClinicalUpdate.admission_id)
