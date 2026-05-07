@@ -27,6 +27,7 @@ from src.domains.backoffice.models import (  # noqa: F401
     HospitalApplication,
     HospitalDocument,
     HospitalVerificationEvent,
+    PlatformSettings,
     SuperAdminActionLog,
 )
 from src.domains.family.models import FamilyInvite  # noqa: F401
@@ -54,6 +55,7 @@ __all__ = [
     "HospitalApplication",
     "HospitalDocument",
     "HospitalVerificationEvent",
+    "PlatformSettings",
     "SuperAdminActionLog",
     "FamilyInvite",
     "StaffInvite",

@@ -10,6 +10,8 @@ from sqlalchemy.orm import selectinload
 from src.core.database import get_db
 from src.core.redis_client import publish_patient_event
 from src.core.security import require_roles
+from src.domains.notifications import policy
+from src.domains.notifications.dispatch import dispatch_family_notification
 from src.domains.patients.models import Admission, ShiftHandover
 from src.domains.patients.schemas import ShiftHandoverCreate, ShiftHandoverOut
 from src.domains.users.enums import UserRole
@@ -138,6 +140,17 @@ async def create_shift_handover(
         "summary": body.summary,
         "created_at": handover.created_at.isoformat(),
     })
+
+    # Shift handovers are tier=important — push during the day, defer overnight.
+    dispatch_family_notification(
+        patient_id=str(admission.patient_id),
+        patient_name=admission.patient.full_name if admission.patient else "Patient",
+        event_kind=policy.EVENT_SHIFT_HANDOVER,
+        new_status=admission.status.value if admission.status else "Update",
+        update_id=None,
+        note_preview=body.summary or "",
+        author_name=current_user.full_name,
+    )
     return out
 
 

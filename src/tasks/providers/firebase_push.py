@@ -43,7 +43,7 @@ def send_multicast(
 ) -> dict:
     """Send a multicast FCM notification and return summary metadata."""
     if not _ensure_firebase_initialized():
-        return {"success": 0, "failure": 0, "invalid_tokens": []}
+        return {"success": 0, "failure": 0, "invalid_tokens": [], "message_ids": []}
 
     try:
         import firebase_admin
@@ -53,7 +53,7 @@ def send_multicast(
             firebase_admin.get_app()
         except ValueError:
             logger.warning("Firebase not initialized - skipping FCM send")
-            return {"success": 0, "failure": 0, "invalid_tokens": []}
+            return {"success": 0, "failure": 0, "invalid_tokens": [], "message_ids": []}
 
         message = messaging.MulticastMessage(
             tokens=tokens,
@@ -82,11 +82,21 @@ def send_multicast(
             and resp.exception
             and "UNREGISTERED" in str(resp.exception).upper()
         ]
+        # Capture FCM message IDs for successful sends so the caller can
+        # persist them on NotificationLog.fcm_message_ids — this is what
+        # lets ops cross-reference Firebase console reports against PatStat
+        # audit records.
+        message_ids = [
+            resp.message_id
+            for resp in response.responses
+            if resp.success and resp.message_id
+        ]
 
         return {
             "success": response.success_count,
             "failure": response.failure_count,
             "invalid_tokens": invalid_tokens,
+            "message_ids": message_ids,
         }
     except Exception as exc:
         logger.error("FCM multicast failed: %s", exc)

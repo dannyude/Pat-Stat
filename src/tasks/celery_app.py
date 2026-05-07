@@ -27,9 +27,22 @@ celery_app.conf.update(
         "cleanup-old-notifications": {
             "task": "src.tasks.notifications.cleanup_old_notifications",
             "schedule": crontab(hour=2, minute=0),
-        }
+        },
+        # Sweep every 5 minutes for notification rows stuck in 'queued' past
+        # the staleness threshold. Cheap (single UPDATE), and a non-zero
+        # result count is a leading indicator of worker instability.
+        "reconcile-stuck-queued-notifications": {
+            "task": "src.tasks.notifications.reconcile_stuck_queued_notifications",
+            "schedule": crontab(minute="*/5"),
+        },
     },
 )
+
+# [ORM]: Import the master model registry FIRST so SQLAlchemy knows about every
+# model (Hospital, User, Patient, …) before any task tries to configure mappers.
+# Without this, string-based relationships like relationship("Hospital", ...) fail
+# to resolve when only a subset of models have been imported.
+importlib.import_module("src.models")
 
 # Import task modules so decorators register tasks on this Celery app.
 importlib.import_module("src.tasks.notifications")

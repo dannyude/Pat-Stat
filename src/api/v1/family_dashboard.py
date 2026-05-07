@@ -128,6 +128,7 @@ async def get_my_patient_updates(
     current_user: User = Depends(_family_only),
     db: AsyncSession = Depends(get_db),
 ):
+
     updates = await list_family_patient_updates(
         family_user_id=current_user.id,
         patient_id=patient_id,

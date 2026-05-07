@@ -14,6 +14,7 @@ from src.domains.backoffice.models.onboarding import (
     HospitalApplication,
     HospitalDocument,
 )
+from src.domains.backoffice.models.settings import PlatformSettings
 
 __all__ = [
     "DocumentType",
@@ -22,4 +23,5 @@ __all__ = [
     "VerificationEventType",
     "HospitalVerificationEvent",
     "SuperAdminActionLog",
+    "PlatformSettings",
 ]

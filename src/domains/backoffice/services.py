@@ -1,9 +1,9 @@
 """Backoffice application services for internal Pat-Stat operations."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, literal, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql.functions import count
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,18 +12,25 @@ from src.domains.backoffice.models import (
     HospitalApplication,
     HospitalDocument,
     HospitalVerificationEvent,
+    PlatformSettings,
     SuperAdminActionLog,
+    VerificationEventType,
 )
 from src.domains.backoffice.schemas import (
     BackofficeOverviewOut,
     DocumentOut,
     HospitalVerificationEventOut,
+    OnboardingTrendPointOut,
+    OnboardingTrendsOut,
+    PlatformSettingsOut,
+    PlatformSettingsUpdate,
     SuperAdminCreateRequest,
     SuperAdminOut,
     SuperAdminActionOut,
 )
-from src.core.config import MAX_SUPER_ADMINS
 from src.core.security import hash_password
+
+MAX_SUPER_ADMINS: int = 3
 from src.domains.users.enums import UserRole
 from src.domains.hospital.models import Hospital
 from src.domains.users.models import User
@@ -303,3 +310,160 @@ async def list_hospital_documents(
         )
         for doc in application.documents
     ]
+
+
+# ── Onboarding trends ───────────────────────────────────────────────────────────
+
+
+def _iso_week_monday(d: date) -> date:
+    """Return the Monday of the ISO week containing ``d`` (weekday 0-indexed)."""
+    return d - timedelta(days=d.weekday())
+
+
+async def get_onboarding_trends(
+    db: AsyncSession, weeks: int = 4
+) -> OnboardingTrendsOut:
+    """Return weekly onboarding activity over the last ``weeks`` ISO weeks.
+
+    For each bucket we return:
+        • submitted — hospitals whose record was created in that week
+        • approved  — number of "Approved" verification events in that week
+        • rejected  — number of "Rejected" verification events in that week
+
+    Buckets are anchored to Monday (ISO week start) in UTC.
+    """
+
+    if weeks < 1:
+        weeks = 1
+    if weeks > 52:
+        weeks = 52
+
+    today_utc = datetime.now(timezone.utc).date()
+    current_monday = _iso_week_monday(today_utc)
+    window_start = current_monday - timedelta(weeks=weeks - 1)
+    window_start_dt = datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc)
+
+    # ── Submitted: bucket Hospital.created_at by week ───────────────────────────
+    # `date_trunc('week', …)` in Postgres also anchors weeks to Monday, so this
+    # aligns cleanly with `_iso_week_monday` above.
+    submitted_bucket = func.date_trunc("week", Hospital.created_at)
+    submitted_rows = (
+        await db.execute(
+            select(submitted_bucket.label("bucket"), count().label("n"))
+            .where(Hospital.created_at >= window_start_dt)
+            .group_by(submitted_bucket)
+        )
+    ).all()
+
+    # ── Approved / rejected: bucket verification events by week ────────────────
+    event_bucket = func.date_trunc("week", HospitalVerificationEvent.created_at)
+    approved_rows = (
+        await db.execute(
+            select(event_bucket.label("bucket"), count().label("n"))
+            .where(
+                HospitalVerificationEvent.created_at >= window_start_dt,
+                HospitalVerificationEvent.event_type == VerificationEventType.approved,
+            )
+            .group_by(event_bucket)
+        )
+    ).all()
+    rejected_rows = (
+        await db.execute(
+            select(event_bucket.label("bucket"), count().label("n"))
+            .where(
+                HospitalVerificationEvent.created_at >= window_start_dt,
+                HospitalVerificationEvent.event_type == VerificationEventType.rejected,
+            )
+            .group_by(event_bucket)
+        )
+    ).all()
+
+    def _to_map(rows) -> dict[date, int]:
+        # `date_trunc` returns timestamptz; normalise to a plain date key.
+        return {r.bucket.date() if hasattr(r.bucket, "date") else r.bucket: r.n for r in rows}
+
+    submitted_map = _to_map(submitted_rows)
+    approved_map = _to_map(approved_rows)
+    rejected_map = _to_map(rejected_rows)
+
+    # ── Emit a contiguous series so the UI can draw without gaps ──────────────
+    points: list[OnboardingTrendPointOut] = []
+    for i in range(weeks):
+        bucket_start = window_start + timedelta(weeks=i)
+        points.append(
+            OnboardingTrendPointOut(
+                week_start=bucket_start,
+                submitted=submitted_map.get(bucket_start, 0),
+                approved=approved_map.get(bucket_start, 0),
+                rejected=rejected_map.get(bucket_start, 0),
+            )
+        )
+
+    return OnboardingTrendsOut(weeks=weeks, points=points)
+
+
+# ── Platform settings (singleton) ───────────────────────────────────────────────
+
+
+async def _get_or_create_platform_settings(db: AsyncSession) -> PlatformSettings:
+    """Return the singleton settings row, creating it lazily on first read."""
+
+    result = await db.execute(
+        select(PlatformSettings).order_by(PlatformSettings.created_at.asc()).limit(1)
+    )
+    settings = result.scalar_one_or_none()
+    if settings is not None:
+        return settings
+
+    settings = PlatformSettings(platform_name="Pat-Stat")
+    db.add(settings)
+    await db.flush()
+    return settings
+
+
+async def get_platform_settings(db: AsyncSession) -> PlatformSettingsOut:
+    """Return the platform-wide settings (lazy-create on first call)."""
+
+    settings = await _get_or_create_platform_settings(db)
+    return PlatformSettingsOut.model_validate(settings)
+
+
+async def update_platform_settings(
+    db: AsyncSession,
+    payload: PlatformSettingsUpdate,
+    actor_user_id: str,
+) -> PlatformSettingsOut:
+    """Apply a partial update to the platform settings and audit the change."""
+
+    settings = await _get_or_create_platform_settings(db)
+
+    changes: dict[str, object] = {}
+    if payload.platform_name is not None:
+        if payload.platform_name != settings.platform_name:
+            changes["platform_name"] = payload.platform_name
+        settings.platform_name = payload.platform_name
+    if payload.support_email is not None:
+        if payload.support_email != settings.support_email:
+            changes["support_email"] = payload.support_email
+        settings.support_email = payload.support_email
+    if payload.default_region is not None:
+        if payload.default_region != settings.default_region:
+            changes["default_region"] = payload.default_region
+        settings.default_region = payload.default_region
+
+    settings.updated_by_id = actor_user_id
+
+    if changes:
+        db.add(
+            SuperAdminActionLog(
+                actor_id=actor_user_id,
+                action="platform_settings.update",
+                target_type="settings",
+                target_id=str(settings.id),
+                note="Updated platform settings",
+                action_metadata={"changes": changes},
+            )
+        )
+
+    await db.flush()
+    return PlatformSettingsOut.model_validate(settings)

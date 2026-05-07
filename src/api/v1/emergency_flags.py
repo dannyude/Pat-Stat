@@ -12,6 +12,8 @@ from sqlalchemy.orm import selectinload
 from src.core.database import get_db
 from src.core.redis_client import publish_patient_event
 from src.core.security import require_roles
+from src.domains.notifications import policy
+from src.domains.notifications.dispatch import dispatch_family_notification
 from src.domains.patients.models import Admission, EmergencyFlag
 from src.domains.patients.schemas import (
     EmergencyFlagCreate,
@@ -107,6 +109,17 @@ async def create_emergency_flag(
         "reason": body.reason,
         "created_at": flag.created_at.isoformat(),
     })
+
+    # Emergency flags are always tier=critical — quiet hours are ignored.
+    dispatch_family_notification(
+        patient_id=str(admission.patient_id),
+        patient_name=admission.patient.full_name if admission.patient else "Patient",
+        event_kind=policy.EVENT_EMERGENCY_FLAG,
+        new_status=admission.status.value if admission.status else "Critical",
+        update_id=None,
+        note_preview=body.reason or "",
+        author_name=current_user.full_name,
+    )
     return out
 
 

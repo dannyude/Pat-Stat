@@ -1,6 +1,10 @@
 """Patient domain models — public re-exports."""
 
-from src.domains.patients.models.audit import NotificationCategory, NotificationLog
+from src.domains.patients.models.audit import (
+    NotificationCategory,
+    NotificationDeliveryStatus,
+    NotificationLog,
+)
 from src.domains.patients.models.clinical import (
     Admission,
     ClinicalUpdate,
@@ -23,5 +27,6 @@ __all__ = [
     "ShiftHandover",
     "FamilyPatientLink",
     "NotificationCategory",
+    "NotificationDeliveryStatus",
     "NotificationLog",
 ]

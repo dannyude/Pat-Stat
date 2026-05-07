@@ -11,6 +11,9 @@ from src.core.database import get_db
 from src.core.rate_limit import limiter
 from src.core.redis_client import publish_patient_event
 from src.core.security import get_current_user, require_roles
+from src.domains.notifications import policy
+from src.domains.notifications.dispatch import dispatch_family_notification
+from src.domains.patients.enums import PatientStatus
 from src.domains.patients.models import ClinicalUpdate, EmergencyFlag
 from src.domains.patients.schemas import ClinicalUpdateCreate, ClinicalUpdateOut
 from src.domains.users.enums import UserRole
@@ -47,6 +50,11 @@ async def add_clinical_update(
     # [DB/Logic]: Always associate updates with the *active* admission, not just the patient.
     # get_active_admission handles the 404 logic if there's no ongoing admission.
     admission = await get_active_admission(patient_id, db, hospital_id=current_user.hospital_id)
+
+    # Determine whether this update changed the patient's clinical status —
+    # used both for the WS payload below and for picking the notification tier.
+    status_actually_changed = body.status != admission.status
+
     update = ClinicalUpdate(
         admission_id=admission.id,
         authored_by_id=current_user.id,
@@ -79,6 +87,29 @@ async def add_clinical_update(
         "update_id": update.id,
         "created_at": update.created_at.isoformat(),
     })
+
+    # ── Family fan-out via Celery + FCM (per notification policy) ────────────
+    # We pick the policy ``event_kind`` based on what actually happened so
+    # routine vitals don't push, status moves do, and "moved to Critical"
+    # always wakes people up regardless of quiet hours.
+    if body.mark_emergency:
+        event_kind = policy.EVENT_EMERGENCY_FLAG
+    elif body.status == PatientStatus.critical and status_actually_changed:
+        event_kind = policy.EVENT_STATUS_TO_CRITICAL
+    elif status_actually_changed:
+        event_kind = policy.EVENT_STATUS_CHANGED
+    else:
+        event_kind = policy.EVENT_VITALS_ONLY
+
+    dispatch_family_notification(
+        patient_id=patient_id,
+        patient_name=admission.patient.full_name if admission.patient else "Patient",
+        event_kind=event_kind,
+        new_status=body.status.value,
+        update_id=update.id,
+        note_preview=body.note or "",
+        author_name=current_user.full_name,
+    )
     return out
 
 
