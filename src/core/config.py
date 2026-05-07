@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     decorators so components downstream don't have to cast strings manually.
     """
 
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True)
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
 
     # ─── App Settings ─────────────────────────────────────────────────────────────
     APP_ENV: Literal["development", "testing", "staging", "production"]
@@ -145,9 +145,4 @@ def get_settings() -> Settings:
 # [Architecture]: Singleton pattern instance exported for immediate use throughout the codebase.
 settings = get_settings()
 
-# ─── Platform Business-Rule Constants ─────────────────────────────────────────
-# Hard cap on super-admin accounts. Enforced by both the bootstrap CLI script
-# (scripts/seed_super_admin.py) and the API service layer (backoffice/services.py).
-MAX_SUPER_ADMINS: int = 3
-
-__all__ = ["Settings", "get_settings", "settings", "MAX_SUPER_ADMINS"]
+__all__ = ["Settings", "get_settings", "settings"]

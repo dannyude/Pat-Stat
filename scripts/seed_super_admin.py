@@ -47,7 +47,7 @@ from sqlalchemy import select  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 from sqlalchemy.sql.functions import count  # noqa: E402
 
-from src.core.config import MAX_SUPER_ADMINS  # noqa: E402
+from src.domains.backoffice.services import MAX_SUPER_ADMINS  # noqa: E402
 from src.core.database import AsyncSessionLocal, engine  # noqa: E402
 from src.core.security import hash_password  # noqa: E402
 from src.domains.users.enums import UserRole  # noqa: E402

@@ -9,11 +9,17 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.11+-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/python-3.12-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi" alt="FastAPI">
   <img src="https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL">
   <img src="https://img.shields.io/badge/Redis-DC382D?style=for-the-badge&logo=redis&logoColor=white" alt="Redis">
   <img src="https://img.shields.io/badge/Celery-37814A?style=for-the-badge&logo=celery&logoColor=white" alt="Celery">
+</p>
+
+<p align="center">
+  <a href="https://github.com/dannyude/Pat-Stat/actions/workflows/ci.yml">
+    <img src="https://github.com/dannyude/Pat-Stat/actions/workflows/ci.yml/badge.svg" alt="CI status">
+  </a>
 </p>
 
 <p align="center">
@@ -110,11 +116,13 @@ docker compose up --build
 
 | Service | URL |
 |---|---|
-| API | <http://localhost:8000> |
-| Swagger UI | <http://localhost:8000/docs> |
-| Flower | <http://localhost:5555> |
-| PostgreSQL | localhost:5432 |
+| API | <http://localhost:8080> |
+| Swagger UI | <http://localhost:8080/docs> |
+| Flower | <http://localhost:8888> |
+| PostgreSQL | localhost:6432 |
 | Redis | localhost:6379 |
+
+> **Why these ports?** Postgres is on `6432` (not the standard `5432`) and Flower is on `8888` (not the default `5555`) because Hyper-V/WSL on Windows reserves ranges including `5434–6333` and `5534–5633`. The non-standard ports dodge `An attempt was made to access a socket in a way forbidden by its access permissions` errors. See block-comments in `docker-compose.yml` and `notes/2026-05-01.md` for diagnostic steps if your machine reserves different ranges.
 
 ### 4. Database setup
 
@@ -359,12 +367,35 @@ See `.env.example` for the complete list. Key groups:
 
 | Task | Trigger | Behavior |
 |---|---|---|
-| `notify_family_of_update` | Clinical update posted | Creates NotificationLog and sends FCM push |
+| `notify_family_of_update` | Clinical update posted | Routes through tier policy; creates NotificationLog and sends FCM push for `critical` / `important` tiers, in-app log only for `routine` |
+| `_send_fcm_multicast` | Subtask of `notify_family_of_update` | Sends multicast FCM, persists per-row delivery outcome to `notification_logs.delivery_status`, prunes invalid tokens |
 | `send_family_invite_email` | Family invite created | Sends invite email (provider pluggable) |
+| `send_staff_invite_email` | Staff invite created | Sends invite email |
 | `cleanup_old_notifications` | Daily at 02:00 UTC (Beat) | Deletes notifications older than 30 days |
+| `reconcile_stuck_queued_notifications` | Every 5 minutes (Beat) | Sweeps `delivery_status='queued'` rows older than 10 minutes and marks them `unknown_outcome` — fail-loud audit signal when a worker crashed mid-task |
 
-FCM tasks retry up to 3 times with a 30-second delay.
-Invalid device tokens are automatically pruned.
+### Notification policy
+
+Push notifications are tiered to prevent spam:
+
+| Event | Tier | Result |
+|---|---|---|
+| Emergency flag raised | `critical` | Push immediately, every device |
+| Status change to "Critical" | `critical` | Push immediately |
+| Status change (any other) | `important` | Push immediately |
+| Shift handover recorded | `important` | Push immediately |
+| Discharge | `important` | Push immediately |
+| Vitals or notes (no status change) | `routine` | In-app inbox only — no push |
+
+### PHI safety
+
+Push notification visible payload (`title` / `body`) carries no PHI:
+- Visible: `"Pat-Stat: Urgent update"` / `"Tap to open Pat-Stat for details."`
+- Real patient data travels only in the encrypted FCM `data` payload, revealed after device unlock
+
+The stored `notification_logs.body` is also generic (`"Tap to view the latest update."`); the bell shows `title` (patient name + status) and the UI fetches clinical detail from `clinical_updates` via `update_id` on tap. This keeps clinical free-text out of any future BI/analytics export.
+
+FCM tasks retry up to 3 times with a 30-second delay. Invalid device tokens are automatically pruned. Every push attempt persists its outcome to `notification_logs.delivery_status` — answer "did this go out?" retrospectively.
 
 ## Security
 
@@ -373,23 +404,65 @@ Invalid device tokens are automatically pruned.
 - Route-level RBAC enforced with `require_roles()`
 - Strict hospital isolation using `hospital_id` scoping
 - SlowAPI rate limiting (120/min default, 30/min writes)
-- WebSocket token validation and family-link authorization checks
+- WebSocket token validation, family-link authorization, and **periodic JWT re-check** that closes long-lived sockets when the access token expires
 - Super-admin count capped to 3 users
+- **HTTP semantics**: missing or invalid auth returns `401 Unauthorized` with the `WWW-Authenticate: Bearer` header (per RFC 7235); role denial returns `403 Forbidden` (per OWASP guidance — never the same code for both)
+- **OWASP non-disclosure 404s**: `assert_family_link_or_404` returns the same `"Patient not found"` message whether the patient does not exist OR exists but isn't yours — defeats ID enumeration attacks
+- **Sanitised 5xx responses**: a global FastAPI exception handler catches anything unexpected, logs the full traceback server-side, and returns a polite `"An unexpected error occurred."` to the client — never leaks stack frames, table names, or internal error strings
+- **PHI-free push payloads**: FCM visible `title`/`body` carry no patient data; clinical detail travels only in the encrypted `data` section after device unlock
+- **Test database safety guard**: `tests/conftest.py` refuses to run pytest unless `DATABASE_URL` contains `test`, eliminating the risk of `DROP SCHEMA public CASCADE` against the dev/prod database
 
 ## Operations
 
 ### Testing
 
-```bash
-# Run all tests
-pytest tests/ -v
+The project ships with a comprehensive pytest suite (~245 tests). The same suite runs in CI on every push and pull request via the `.github/workflows/ci.yml` workflow.
 
-# Run a specific suite
-pytest tests/test_auth.py -v
+**Local convenience script** (recommended — handles env vars + the `patstat_test_db` requirement automatically):
 
-# Run with coverage
-pytest tests/ --cov=src
+```powershell
+# Full suite (Windows / PowerShell)
+.\scripts\test.ps1
+
+# Single file
+.\scripts\test.ps1 tests\test_auth.py -v
+
+# Filter by name
+.\scripts\test.ps1 -k "dispatch"
 ```
+
+**One-time setup** (the test suite refuses to run against the dev DB to prevent accidental data loss — see `tests/conftest.py`):
+
+```powershell
+docker exec patstat-db psql -U postgres -c "CREATE DATABASE patstat_test_db;"
+```
+
+**Direct invocation** (Linux / macOS / WSL — useful for CI parity):
+
+```bash
+DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/patstat_test_db' \
+DATABASE_URL_SYNC='postgresql://postgres:postgres@localhost:5432/patstat_test_db' \
+pytest --tb=short -q
+```
+
+**Coverage**:
+
+```bash
+pytest tests/ --cov=src --cov-report=term-missing
+```
+
+### CI / CD
+
+Continuous Integration runs on every push and pull request to `main` and `development`. The workflow:
+
+1. Spins up Postgres 16 and Redis 7 as service containers
+2. Installs Python 3.12 and project dependencies via `uv` (cached)
+3. Creates the test database
+4. Runs the full pytest suite
+
+Status visible at the top of this README and on every PR. To enable branch protection (recommended), open **Settings → Branches → Add rule → Require status checks → CI / Run pytest** in GitHub.
+
+Continuous Deployment is intentionally **not** automated — production releases are manual to maintain healthcare-grade release control.
 
 ### Database Migrations
 
