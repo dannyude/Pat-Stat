@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   # ─── PostgreSQL ─────────────────────────────────────────────────────────────
@@ -11,7 +9,14 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: patstat_db
     ports:
-      - "5432:5432"
+      # Host port chosen to dodge the Windows excluded port range. Avoid
+      # 5432 (collides with a native Windows Postgres install), 5433
+      # (collides with a second native Postgres), and the 5434–6333 chain
+      # (Hyper-V/WSL reserved range; verify with
+      #   netsh interface ipv4 show excludedportrange protocol=tcp
+      # if you ever see "An attempt was made to access a socket in a way
+      # forbidden by its access permissions" again).
+      - "6432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -62,7 +67,7 @@ services:
       FCM_PROJECT_ID: ${FCM_PROJECT_ID}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
     ports:
-      - "8000:8000"
+      - "8080:8000"
     volumes:
       - .:/app
       - ./secrets:/secrets
@@ -79,14 +84,30 @@ services:
       dockerfile: Dockerfile
     container_name: patstat_celery
     command: celery -A src.tasks.celery_app.celery_app worker --loglevel=info --concurrency=4
+    # The Settings class instantiates eagerly on import, so the worker must
+    # supply every required field even when it doesn't use them at runtime
+    # (e.g. APP_HOST/APP_PORT/ALLOWED_ORIGINS are API-only). Mirror the api
+    # service's environment block so a single .env change propagates to
+    # both processes without divergence.
     environment:
       APP_ENV: development
+      DEBUG: "true"
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8000"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/patstat_db
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/patstat_db
       REDIS_URL: redis://redis:6379/0
+      REDIS_SESSION_DB: "2"
+      REDIS_CELERY_URL: redis://redis:6379/1
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       SECRET_KEY: ${SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+      REFRESH_TOKEN_EXPIRE_DAYS: "7"
       FIREBASE_CREDENTIALS_PATH: /secrets/firebase-service-account.json
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
     volumes:
       - .:/app
       - ./secrets:/secrets
@@ -101,9 +122,28 @@ services:
       dockerfile: Dockerfile
     container_name: patstat_beat
     command: celery -A src.tasks.celery_app.celery_app beat --loglevel=info
+    # Beat imports celery_app, which imports src.core.config, which eagerly
+    # validates Settings — so beat needs every required field even though
+    # at runtime it only schedules tasks. Mirror the api/celery_worker block.
     environment:
+      APP_ENV: development
+      DEBUG: "true"
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8000"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/patstat_db
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/patstat_db
+      REDIS_URL: redis://redis:6379/0
+      REDIS_SESSION_DB: "2"
+      REDIS_CELERY_URL: redis://redis:6379/1
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+      REFRESH_TOKEN_EXPIRE_DAYS: "7"
+      FIREBASE_CREDENTIALS_PATH: /secrets/firebase-service-account.json
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
     volumes:
       - .:/app
     depends_on:
@@ -117,7 +157,11 @@ services:
     container_name: patstat_flower
     command: celery -A src.tasks.celery_app.celery_app flower --port=5555
     ports:
-      - "5555:5555"
+      # Host 8888 → container 5555. Flower's default port (5555) sits inside
+      # the Windows reserved range 5534–5633, so we expose it on 8888 outside
+      # the chain. Same Windows-port-reservation issue we hit for postgres
+      # (see comment on the postgres service block).
+      - "8888:5555"
     environment:
       CELERY_BROKER_URL: redis://redis:6379/1
     depends_on:
