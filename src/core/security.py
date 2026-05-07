@@ -18,8 +18,24 @@ from src.domains.users.models import User, UserRole
 # old passwords get cleanly upgraded on next login.
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# [Architecture]: FastAPI Dependency for extracting the Bearer token from the Auth header
-bearer_scheme = HTTPBearer()
+# [Architecture]: FastAPI Dependency for extracting the Bearer token from the Auth header.
+#
+# Why ``auto_error=False``?
+# -------------------------
+# FastAPI's default ``HTTPBearer()`` raises ``HTTPException(403)`` when the
+# ``Authorization`` header is missing entirely. That conflates two distinct
+# situations the HTTP spec separates:
+#
+#   • 401 Unauthorized — "I don't know who you are. Send credentials."
+#   • 403 Forbidden    — "I know who you are, but you can't do this."
+#
+# We want 401 for missing/invalid credentials and 403 only for role denial
+# (which ``require_roles`` already handles correctly). Setting
+# ``auto_error=False`` lets ``get_current_user`` raise the right code itself,
+# *with* the ``WWW-Authenticate: Bearer`` header that well-behaved clients
+# (browsers, healthcare interop tools, third-party SSO) use to decide
+# whether to retry with credentials.
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def hash_password(plain: str) -> str:
@@ -90,22 +106,43 @@ def decode_token(token: str) -> dict:
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """
     [Architecture/Security]: The Primary Auth Guard.
     Used as a FastAPI dependency injected into protected routes.
+
     1. Extracts and validates the token.
     2. Enforces that it is an 'access' token (not 'refresh').
     3. Fetches the User from the database to ensure they haven't been deleted.
     4. Enforces the User is currently 'active' (e.g. Hospital hasn't been suspended).
+
+    Status codes
+    ------------
+    Returns 401 (with ``WWW-Authenticate: Bearer``) when the request is
+    unauthenticated for any reason — missing header, malformed token,
+    expired token, deleted/deactivated user. Role-based denial of an
+    *authenticated* user is 403, raised by :func:`require_roles`.
     """
     from sqlalchemy.orm import selectinload
 
+    # Missing or non-Bearer Authorization header — auto_error=False on the
+    # HTTPBearer scheme means we get None instead of FastAPI auto-raising.
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     payload = decode_token(credentials.credentials)
     if payload.get("type") != "access":
-        raise HTTPException(status_code=401, detail="Invalid token type")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     user_id = payload.get("sub")
     
@@ -119,7 +156,11 @@ async def get_current_user(
     user = result.scalar_one_or_none()
 
     if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="User not found or inactive")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     return user
 
