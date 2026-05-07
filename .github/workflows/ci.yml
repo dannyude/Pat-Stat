@@ -1,0 +1,155 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PatStat — Continuous Integration
+#
+# This workflow runs on every push and pull request. It:
+#   1. Spins up Postgres + Redis as "service containers" alongside the runner.
+#   2. Installs Python 3.12 and project dependencies via uv (10–20x faster than pip).
+#   3. Creates the patstat_test_db database that the tests need.
+#   4. Runs the full pytest suite.
+#
+# If anything fails, the PR gets a red ✗ on GitHub and the merge button greys out
+# (assuming you turn on branch protection — see the README CI section).
+#
+# Reference: https://docs.github.com/en/actions/writing-workflows
+# ─────────────────────────────────────────────────────────────────────────────
+
+# A human-friendly name shown in the Actions tab on GitHub.
+name: CI
+
+# `on:` declares the events that trigger this workflow.
+#
+# We trigger on:
+#   • Every push to main/development (catches direct commits + merged PRs).
+#   • Every pull request targeting those branches (catches PR work in progress).
+#
+# We deliberately do NOT trigger on every branch push — that would burn minutes
+# for noisy WIP branches. Developers can still trigger manually via the Actions
+# tab if they want a pre-PR sanity check.
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+# A workflow contains one or more "jobs". Each job runs on a fresh VM ("runner").
+# Jobs run in parallel by default; we have one for now (`test`) but you'll see
+# how to add more (e.g. `lint`, `type-check`) without any boilerplate.
+jobs:
+  test:
+    name: Run pytest
+    # `ubuntu-latest` is the cheapest, fastest, and best-supported runner.
+    # macOS and Windows runners exist but cost 10x and 2x respectively per
+    # minute — never pick them unless you're testing OS-specific behaviour.
+    runs-on: ubuntu-latest
+
+    # `services:` — these are extra Docker containers GitHub starts BEFORE the
+    # job runs and tears down after. Network-reachable from the runner at the
+    # service name as hostname. Equivalent to `docker compose up postgres redis`
+    # but managed by Actions so we don't have to script lifecycle ourselves.
+    services:
+      postgres:
+        # Pin to alpine — same image we use in docker-compose.yml so behaviour
+        # matches local dev. Pinning the major version stops a Postgres 17 → 18
+        # upgrade silently breaking the build later.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: patstat_db
+        ports:
+          # Map container 5432 → runner 5432 so the test process can hit
+          # localhost:5432 without any extra config. Note: this is the
+          # GitHub runner's localhost, not your dev machine's — we don't
+          # need port 6432 here, no Windows port conflicts on Linux.
+          - 5432:5432
+        # `--health-cmd` makes Actions wait until Postgres responds to
+        # pg_isready before starting the job. Without this, the first
+        # connection in the test run would race the database boot.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    # `steps:` — the actual ordered work. Each step runs in the same VM,
+    # in the same shell session, with files persisted between steps.
+    steps:
+      # Step 1: Pull the repo into the runner. `actions/checkout` is the
+      # canonical first step in 99% of GitHub workflows.
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      # Step 2: Install Python. `setup-python` knows about pyproject.toml's
+      # required-python field but we pin explicitly so a future bump there
+      # forces us to think about whether CI should follow.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Step 3: Install uv (the fast package manager our project uses).
+      # The `astral-sh/setup-uv` action also caches `~/.cache/uv` between
+      # runs so subsequent CI runs install dependencies in seconds.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          # Cache by uv.lock hash — when the lockfile changes, cache busts.
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # Step 4: Resolve and install dependencies (including the dev group
+      # which carries pytest + httpx + pytest-asyncio).
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # Step 5: Create the test database. The conftest.py guard refuses to
+      # run unless DATABASE_URL contains "test", so we use patstat_test_db.
+      # The default Postgres image only creates patstat_db — we add the
+      # test DB manually here.
+      - name: Create patstat_test_db
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -c "CREATE DATABASE patstat_test_db;"
+
+      # Step 6: Run the actual test suite.
+      #
+      # We pass DATABASE_URL / DATABASE_URL_SYNC pointing at the service
+      # container's Postgres on localhost. The conftest.py test-DB guard
+      # is satisfied because the URL contains "test".
+      #
+      # `--tb=short` keeps failure tracebacks readable in the Actions log
+      # without being too terse to debug. `-q` is quiet mode — fewer lines
+      # of output, faster to scroll through when 245 tests pass.
+      - name: Run pytest
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/patstat_test_db
+          DATABASE_URL_SYNC: postgresql://postgres:postgres@localhost:5432/patstat_test_db
+          REDIS_URL: redis://localhost:6379/0
+          REDIS_CELERY_URL: redis://localhost:6379/1
+          REDIS_SESSION_DB: "2"
+          CELERY_BROKER_URL: redis://localhost:6379/1
+          CELERY_RESULT_BACKEND: redis://localhost:6379/1
+          # Required by Settings — these are CI-only fakes; never put real
+          # secrets in workflow YAML, use GitHub Secrets for those.
+          APP_ENV: testing
+          DEBUG: "true"
+          APP_HOST: 0.0.0.0
+          APP_PORT: "8000"
+          SECRET_KEY: "ci-secret-key-32-chars-long-min-aaaaaaaaaaaaaaaa"
+          JWT_ALGORITHM: HS256
+          ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+          REFRESH_TOKEN_EXPIRE_DAYS: "7"
+          FIREBASE_CREDENTIALS_PATH: /tmp/firebase-not-real.json
+          FCM_PROJECT_ID: ci-fake-project
+          ALLOWED_ORIGINS: "http://localhost:3000"
+        run: uv run pytest --tb=short -q
